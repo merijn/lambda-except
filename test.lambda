@@ -1,0 +1,5 @@
+main =
+  let
+    toFalse = \(b :: Bool) => False
+    foo = \(f :: Bool -> Bool) => f True
+  in foo toFalse

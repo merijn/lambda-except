@@ -1,0 +1,45 @@
+Name:                lambda-except
+Version:             0.1.0
+
+Homepage:            
+Bug-Reports:         
+
+Author:              Merijn Verstraaten
+Maintainer:          Merijn Verstraaten <merijn@inconsistent.nl>
+Copyright:           Copyright © 2015 Merijn Verstraaten
+
+License:             BSD3
+License-File:        LICENSE
+
+Category:            System
+Cabal-Version:       >= 1.10
+Build-Type:          Simple
+Tested-With:         GHC == 7.10
+
+Synopsis:            
+
+Description:
+
+Executable main
+  Default-Language:     Haskell2010
+  GHC-Options:          -O0 -Wall -fno-warn-unused-do-bind
+                        -fno-warn-unticked-promoted-constructors
+  Main-Is:              Main.hs
+  Other-Modules:        AST
+                        Eval
+                        Parse
+                        PrettyPrint
+
+  Build-Depends:        base
+               ,        ansi-wl-pprint
+               ,        bound
+               ,        mtl
+               ,        parsers
+               ,        prelude-extras
+               ,        text
+               ,        transformers
+               ,        trifecta
+
+Source-Repository head
+  Type:     git
+  Location: git+ssh://github.com:merijn/lambda-except
