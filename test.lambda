@@ -1,5 +1,15 @@
-main =
-  let
-    toFalse = \(b :: Bool) => False
-    foo = \(f :: Bool -> Bool) => f True
-  in foo toFalse
+data Bool where
+  True :: Bool
+  False :: Bool
+
+not :: Bool -> Bool
+foo :: (Bool -> Bool) -> Bool
+main :: Bool
+
+not = \(b :: Bool) -> case b of
+    True -> False
+    _ -> True
+
+foo = \(f :: Bool -> Bool) -> f True
+
+main = foo not

@@ -27,12 +27,16 @@ Executable main
   Main-Is:              Main.hs
   Other-Modules:        AST
                         Eval
-                        Parse
+                        Parser
                         PrettyPrint
+                        TypeCheck
+                        UniqMap
 
   Build-Depends:        base
                ,        ansi-wl-pprint
                ,        bound
+               ,        containers
+               ,        either
                ,        mtl
                ,        parsers
                ,        prelude-extras

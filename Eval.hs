@@ -1,20 +1,56 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
 module Eval where
 
 import Bound
+import Data.Bifunctor
+import Data.Maybe
 
 import AST
+import UniqMap
 
 instantiateDecls :: Decls a -> Scope Int Expr a -> Expr a
-instantiateDecls (Decls decls) = inst
+instantiateDecls decls = inst
   where
-    es = map (inst . snd) decls
-    inst = instantiate (es !!)
+    es = fmap (first inst) decls
+    inst = instantiate (fst . exprAt es)
 
-whnfWith :: Decls String -> Expr String -> Expr String
-whnfWith decls e = whnf $ buildLet decls e Undefined
+matchPatWithEval
+    :: forall a . (Expr a -> Expr a)
+    -> Expr a
+    -> Alt Expr a
+    -> Maybe (Expr a)
+matchPatWithEval eval expr (Alt pat body _) = inst . snd <$> match pat expr
+  where
+    inst :: [Expr a] -> Expr a
+    inst bindings = instantiate (bindings !!) body
 
-nfWith :: Decls String -> Expr String -> Expr String
-nfWith decls e = nf $ buildLet decls e Undefined
+    match :: Pat String -> Expr a -> Maybe (Expr a, [Expr a])
+    match (VarP _ _) e = Just (e, [e])
+    match WildP{} e = Just (e, [])
+    match (AsP _ pats _) e
+      | Just (e', ms) <- match pats e = Just (e', e':ms)
+
+    match (ConP s1 pats _) (eval -> Con s2 args l)
+      | s1 == s2
+      , Just (es, ms) <- go pats args = Just (Con s2 es l, ms)
+      where
+        go :: [Pat String] -> [Expr a] -> Maybe ([Expr a], [Expr a])
+        go [] [] = Just ([], [])
+        go (p:ps) (a:as)
+            | Just (e, ms) <- match p a
+            = bimap (e:) (ms++) <$> go ps as
+        go _ _ = Nothing
+
+    match _ _ = Nothing
+
+whnfWith :: Module String -> Expr String -> Expr String
+whnfWith m e = whnf $ Let decls (abstractKeys decls e) Builtin
+  where decls = moduleDecls m
+
+nfWith :: Module String -> Expr String -> Expr String
+nfWith m e = nf $ Let decls (abstractKeys decls e) Builtin
+  where decls = moduleDecls m
 
 whnf :: Expr a -> Expr a
 whnf (App t1 t2 l)
@@ -23,16 +59,15 @@ whnf (App t1 t2 l)
     where
       fun = whnf t1
 
-whnf (If p x y l)
-    | Bool b _ <- predicate = if b then whnf x else whnf y
-    | otherwise = If predicate x y l
-    where
-      predicate = whnf p
+whnf (Case expr alts _) =
+  case mapMaybe (matchPatWithEval whnf expr) alts of
+    [] -> error "Incomplete pattern!"
+    (x:_) -> x
 
 whnf (Let decls body _) = whnf $ instantiateDecls decls body
 
 whnf expr@Lambda{} = expr
-whnf expr@Bool{} = expr
+whnf expr@Con{} = expr
 whnf expr@Int{} = expr
 whnf expr@Var{} = expr
 
@@ -41,12 +76,20 @@ nf (App t1 t2 l) = case whnf t1 of
     Lambda _ _ body _ -> nf $ instantiate1 t2 body
     t1' -> App (nf t1') (nf t2) l
 
-nf (If p x y l) = case nf p of
-    Bool b _ -> if b then nf x else nf y
-    predicate -> If predicate (nf x) (nf y) l
+nf (Case (nf -> expr) alts@(Alt pat _ _:_) l)
+    | Var{} <- expr
+    , notWildCard pat = Case expr alts l
+  where
+    notWildCard WildP{} = False
+    notWildCard _ = True
+
+nf (Case (nf -> expr) alts _) =
+  case mapMaybe (matchPatWithEval id expr) alts of
+    [] -> error "Incomplete pattern!"
+    (x:_) -> x
 
 nf (Let decls body _) = nf $ instantiateDecls decls body
 nf (Lambda n t body l) = Lambda n t (toScope . nf . fromScope $ body) l
-nf expr@Bool{} = expr
+nf (Con s args l) = Con s (map nf args) l
 nf expr@Int{} = expr
 nf expr@Var{} = expr
