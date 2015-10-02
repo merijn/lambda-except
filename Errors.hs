@@ -1,30 +1,107 @@
 module Errors where
 
+import Prelude hiding ((<$>), span)
+import Control.Lens
+import Data.List (group, sort)
+import Text.PrettyPrint.ANSI.Leijen hiding (group)
+
+import AST
+import PrettyPrint
+
 type Errors = [Error]
 
+dblLine :: Doc
+dblLine = line <> line
+
 data Error
-    = DupType String
-    | DupDef String
-    | DupCon String
-    | DupBind String
-    | MissType String
-    | MissDef String
+    = DupType Name
+    | DupData Name
+    | DupDef Name
+    | DupCon Name
+    | DupPatBind Name
+    | MissType Name
+    | MissDef Name
     deriving (Show)
 
-dupType :: [String] -> Errors
+dupType :: [Name] -> Errors
 dupType = map DupType
 
-dupDef :: [String] -> Errors
+dupData :: [Name] -> Errors
+dupData = map DupData
+
+dupDef :: [Name] -> Errors
 dupDef = map DupDef
 
-dupCon :: [String] -> Errors
+dupCon :: [Name] -> Errors
 dupCon = map DupCon
 
-dupBind :: [String] -> Errors
-dupBind = map DupBind
+dupPatBind :: [Name] -> Errors
+dupPatBind = map DupPatBind
 
-missType :: [String] -> Errors
+missType :: [Name] -> Errors
 missType = map MissType
 
-missDef :: [String] -> Errors
+missDef :: [Name] -> Errors
 missDef = map MissDef
+
+reportDuplicates :: String -> [Name] -> Doc
+reportDuplicates desc = vsep . map reportDuplicate . group
+  where
+    printLoc :: Span -> Doc
+    printLoc s = prettySpan s <$> prettySource s
+
+    reportDuplicate :: [Name] -> Doc
+    reportDuplicate [] = error "Can't happen"
+    reportDuplicate ns@(n:_) = vsep
+        [ hsep [ text "Duplicate"
+               , string desc
+               , text "for"
+               , bold (prettify n) <> text ":"
+               ]
+        , indent 4 . vsep . map printLoc . sort $ ns^..folded.span
+        ]
+
+reportMissing :: String -> Name -> Doc
+reportMissing desc n = vsep
+  [ hsep [ text "Missing"
+         , string desc
+         , text "for"
+         , bold (prettify n) <> text ":"
+         ]
+  , prettySpan (n^.span)
+  , prettySource (n^.span)
+  ]
+
+reportErrors :: Errors -> Doc
+reportErrors es = goDup
+    [ ("type annotations", [n | DupType n <- es])
+    , ("data declarations", [n | DupData n <- es])
+    , ("definitions", [n | DupDef n <- es])
+    , ("constructor names", [n | DupCon n <- es])
+    , ("pattern binds", [n | DupPatBind n <- es])
+    ]
+    <> goMiss
+    [ ("type annotation", [n | MissType n <- es])
+    , ("definition", [n | MissDef n <- es])
+    ]
+  where
+    goDup :: [(String, [Name])] -> Doc
+    goDup [] = empty
+    goDup ((desc, names):l)
+        | null names = goDup l
+        | null l = errs
+        | otherwise = errs <> dblLine <> goDup l
+        where
+          errs :: Doc
+          errs = reportDuplicates desc names
+
+    goMiss :: [(String, [Name])] -> Doc
+    goMiss [] = empty
+    goMiss ((desc, names):l)
+        | null names = goMiss l
+        | null l = errs
+        | otherwise = errs <$> goMiss l
+        where
+          errs :: Doc
+          errs = vsep $ map (reportMissing desc) names
+

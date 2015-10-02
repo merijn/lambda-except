@@ -35,14 +35,19 @@ Executable main
   Build-Depends:        base
                ,        ansi-wl-pprint
                ,        bound
+               ,        bytestring
+               ,        comonad
                ,        containers
                ,        either
+               ,        lens
                ,        mtl
                ,        parsers
                ,        prelude-extras
+               ,        reducers
                ,        text
                ,        transformers
                ,        trifecta
+               ,        utf8-string
 
 Source-Repository head
   Type:     git

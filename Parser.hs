@@ -1,11 +1,11 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
-module Parser (runParser, moduleParser, expr) where
+module Parser (parseFromFile, parseFromData, moduleParser, expr) where
 
-import Bound
 import Control.Applicative
+import Control.Lens hiding (cons)
 import Data.Bifunctor
-import Text.Trifecta hiding (Parser, Result(..))
 
 import AST
 import Errors
@@ -19,50 +19,47 @@ parseUniq
     -> Parser (UniqMap k v)
 parseUniq f = parseValid f . buildUniqMap
 
-withPos :: Parser (Loc -> a) -> Parser a
-withPos p = do
-    start <- position
-    result <- p
-    end <- position
-    return $ result (Loc start end)
-
 data Declaration
-    = Definition (String, Expr String)
-    | TypeAnn (String, Type)
+    = Definition Name (Expr Name)
+    | TypeAnn Name Type
+    deriving (Eq,Ord,Show)
 
 data TopLevelDeclaration
     = DataType DataType
     | Decl Declaration
+    deriving (Eq,Ord,Show)
 
-moduleParser :: Parser (Module String)
+moduleParser :: Parser (Module Name)
 moduleParser = do
-    contents <- lineSeparated $ DataType <$> dataParser
-                            <|> Decl <$> declaration
+    let topLevel = (Decl <$> declaration) <|> (DataType <$> dataParser)
+    contents <- topLevel `sepEndBy` semi <* eof
 
     let rawTypes = [x | DataType x <- contents]
 
-    types <- parseUniq dupType [(dataName x, x) | x <- rawTypes]
+    types <- parseUniq dupData [(x^.dataName, x) | x <- rawTypes]
     cons <- parseUniq dupCon . concatMap addTypeToTypeCons $ rawTypes
     decls <- buildDecls [x | Decl x <- contents]
     return $ Module types cons decls
   where
-    addTypeToTypeCons t = map (second (,t)) . assocs $ dataCons t
+    addTypeToTypeCons :: DataType -> [(Name, (Type, DataType))]
+    addTypeToTypeCons t = ifoldMapOf (dataCons.ifolded) wrap t
+      where wrap i x = [(i, (x, t))]
 
 dataParser :: Parser DataType
 dataParser = do
     reserve varId "data"
-    name <- ident conId
+    typeName <- name conId
     reserve varId "where"
-    constructors <- indented $ lineSeparated constructor
-    Data name <$> parseUniq dupCon constructors
+    constructors <- nesting $ constructor `sepEndBy` semi
+    Data typeName <$> parseUniq dupCon constructors
 
-constructor :: Parser (String, Type)
-constructor = (,) <$> ident conId <* reserve conOp "::" <*> typeParser
+constructor :: Parser (Name, Type)
+constructor = (,) <$> name conId <* reserve conOp "::" <*> typeParser
 
-buildDecls :: [Declaration] -> Parser (Decls String)
+buildDecls :: [Declaration] -> Parser (Decls Name)
 buildDecls decls = do
-    types <- parseUniq dupType [t | TypeAnn t <- decls]
-    defs <- parseUniq dupDef [d | Definition d <- decls]
+    types <- parseUniq dupType [(n, t) | TypeAnn n t <- decls]
+    defs <- parseUniq dupDef [(n, b) | Definition n b <- decls]
 
     let decMap | null types || null defs = pure mempty
                | otherwise = intersectUniq (,) defs types
@@ -73,19 +70,15 @@ buildDecls decls = do
     scopify d = first (abstractKeys d) <$> d
 
 declaration :: Parser Declaration
-declaration = Definition <$> definition <|> TypeAnn <$> typeAnnotation
+declaration = do
+    declName <- name varId
+    definition declName <|> typeAnnotation declName
+  where
+    definition :: Name -> Parser Declaration
+    definition n = Definition n <$ reserve varOp "=" <*> expr
 
-definition :: Parser (String, Expr String)
-definition = do
-    name <- try $ ident varId <* reserve varOp "="
-    expression <- expr
-    return (name, expression)
-
-typeAnnotation :: Parser (String, Type)
-typeAnnotation = do
-    name <- try $ ident varId <* reserve conOp "::"
-    typeAnn <- typeParser
-    return (name, typeAnn)
+    typeAnnotation :: Name -> Parser Declaration
+    typeAnnotation n = TypeAnn n <$ reserve conOp "::" <*> typeParser
 
 typeParser :: Parser Type
 typeParser = arrType <|> primType
@@ -97,9 +90,14 @@ typeParser = arrType <|> primType
         type2 <- typeParser
         return $ TyArr type1 type2
 
-expr :: Parser (Expr String)
-expr = appExpr <|> primExpr
+expr :: Parser (Expr Name)
+expr = chainl1 primExpr (pure app)
   where
+    app e1 e2 = App e1 e2 $ Span begin end s
+      where
+        Span begin _ s = e1^?!spans
+        Span _ end _ = e2^?!spans
+
     primExpr = choice
         [ parens expr
         , lambda
@@ -107,16 +105,10 @@ expr = appExpr <|> primExpr
         , caseOf
         , conExpr
         , intExpr
-        , ifExpr
         , variable
         ]
 
-    appExpr = withPos . try $ do
-        expr1 <- primExpr
-        expr2 <- expr
-        return $ App expr1 expr2
-
-lambda :: Parser (Expr String)
+lambda :: Parser (Expr Name)
 lambda = withPos $ do
     reserve varOp "\\"
     (var, ty) <- parens binding <|> binding
@@ -124,59 +116,47 @@ lambda = withPos $ do
     body <- expr
     return $ Lambda var ty (abstract1 var body)
   where
-    binding = (,) <$> ident varId <* reserve varOp "::" <*> typeParser
+    binding = (,) <$> name varId <*> bindType
+    bindType = try (reserve varOp "::") *> (Just <$> typeParser)
+           <|> pure Nothing
 
-letBlock :: Parser (Expr String)
+letBlock :: Parser (Expr Name)
 letBlock = withPos $ do
     reserve varId "let"
-    decls <- buildDecls =<< indented (lineSeparated declaration)
+    decls <- buildDecls =<< nesting (declaration `sepEndBy` semi)
     reserve varId "in"
     body <- expr
     return $ Let decls (abstractKeys decls body)
 
-caseOf :: Parser (Expr String)
+caseOf :: Parser (Expr Name)
 caseOf = withPos $ do
     reserve varId "case"
     e <- expr
     reserve varId "of"
-    alts <- indented $ lineSeparated alternative
+    alts <- nesting $ alternative `sepEndBy` semi
     return $ Case e alts
 
-alternative :: Parser (Alt Expr String)
+alternative :: Parser (Alt Expr Name)
 alternative = withPos $ do
     pat <- pattern
-    parseValid dupBind . buildUniqMap . fmap (,()) $ pat
+    parseValid dupPatBind . buildUniqMap . fmap (,()) $ pat
     reserve varOp "->"
     body <- expr
     return $ Alt pat (abstractPos pat body)
 
-pattern :: Parser (Pat String)
+pattern :: Parser (Pat Name)
 pattern = parens pattern <|> choice (map withPos
     [ WildP <$ reserve varId "_"
-    , AsP <$> try (ident varId <* reserve varId "@") <*> pattern
-    , VarP <$> ident varId
-    , ConP <$> ident conId <*> pure []
+    , AsP <$> try (name varId <* reserve varId "@") <*> pattern
+    , VarP <$> name varId
+    , ConP <$> name conId <*> many pattern
     ])
 
-conExpr :: Parser (Expr String)
-conExpr = withPos $ Con <$> ident conId <*> many expr
+conExpr :: Parser (Expr Name)
+conExpr = withPos $ Con <$> name conId <*> pure []
 
-intExpr :: Parser (Expr String)
+intExpr :: Parser (Expr Name)
 intExpr = withPos $ Int <$> integer
 
-variable :: Parser (Expr String)
-variable = withPos $ Var <$> ident varId
-
-ifExpr :: Parser (Expr String)
-ifExpr = withPos $ do
-    reserve varId "if"
-    b <- expr
-    reserve varId "then"
-    (e1, pos1) <- withPos $ fmap (,) expr
-    reserve varId "else"
-    (e2, pos2) <- withPos $ fmap (,) expr
-    return $ Case b [ Alt (ConP "True" [] Builtin) (scope e1) pos1
-                    , Alt (ConP "False" [] Builtin) (scope e2) pos2
-                    ]
-  where
-    scope = abstract $ const Nothing
+variable :: Parser (Expr Name)
+variable = withPos $ LocVar <$> name varId

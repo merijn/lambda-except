@@ -1,0 +1,24 @@
+data Bool where
+  True :: Bool
+  False :: Bool
+
+data Bool where
+  Unit :: Bool
+
+data Unit where
+  Unit :: Unit
+
+bar :: Int
+bar :: Bool
+bar = case True of
+    Unit -> False
+
+xyzzy :: Int
+
+baz = False
+
+a = False
+a = 2
+
+test = case True of
+    Bar a a -> False

@@ -1,74 +1,97 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLists #-}
 module Lexer
     ( Parser
-    , runParser
+    , parseFromFile
+    , parseFromData
     , parseValid
+    , name
+    , withPos
     , varId
     , conId
     , varOp
     , conOp
-    , lineSeparated
-    , indented
+    , module Text.Trifecta
     ) where
 
 import Control.Applicative
 import Control.Monad.State
 import Data.Bifunctor
+import qualified Data.ByteString as Strict hiding (empty, snoc)
+import Data.ByteString.UTF8 as UTF8
 import Data.Char
 import Data.Either.Validation
-import Data.Int
+import Data.Semigroup.Reducer
 import Text.Parser.LookAhead (LookAheadParsing, lookAhead)
 import Text.Parser.Token.Highlight
-import Text.Trifecta hiding (Parser, Failure, Success)
-import Text.Trifecta.Delta (Delta, column)
-import qualified Text.Trifecta as Trifecta
+import Text.Trifecta hiding (Parser, Failure, Success, parseFromFile)
+import Text.Trifecta.Delta (Delta(..), column)
+import qualified Text.Trifecta as Tri
 
+import AST
 import Errors
 
-data Layout = Indent Int64 | NewLayout deriving (Show)
-
-newtype Parser a = Parser (StateT ([Error], [Layout]) Trifecta.Parser a)
+newtype Parser a = Parser (StateT ([Error], [Int]) Tri.Parser a)
   deriving
     ( Alternative, Applicative, CharParsing, DeltaParsing, Functor
     , LookAheadParsing, MarkParsing Delta, Monad, MonadPlus
-    , MonadState ([Error], [Layout]), Parsing)
+    , MonadState ([Error], [Int]), Parsing)
 
-runParser :: Parser a -> Trifecta.Parser a
-runParser (Parser p) = do
-    (result, (errors, _)) <- runStateT p ([], [])
-    if null errors
-       then return result
-       else raiseErr . failed $ "Errors: " ++ show errors
+runParser :: Reducer t Rope => Delta -> Parser a -> t -> Result a
+runParser d (Parser p) inp = do
+    case parse (runStateT p ([], [])) of
+        Tri.Failure e -> Tri.Failure e
+        Tri.Success (x, ([], _)) -> Tri.Success x
+        Tri.Success (_, (errs, _)) -> Tri.Failure (reportErrors errs)
+  where
+    parse pa = starve $ feed inp $ stepParser (release d *> pa) mempty mempty
+
+parseFromFile :: Parser a -> String -> IO (Result a)
+parseFromFile p fn = do
+  s <- Strict.readFile fn
+  return $ runParser (Directed (UTF8.fromString fn) 0 0 0 0) p s
+
+parseFromData :: Reducer t Rope => Parser a -> t -> Result a
+parseFromData = runParser (Lines 0 0 0 0)
 
 parseValid :: Monoid a => (e -> Errors) -> Validation e a -> Parser a
 parseValid f p = case p of
     Failure n -> modify (first . mappend . f $ n) >> return mempty
     Success result -> return result
 
-horizontalSpace :: Parser Int64
+name :: IdentifierStyle (Unspaced Parser) -> Parser Name
+name style = do
+    (result :~ s) <- spanned . runUnspaced $ ident style
+    someSpace
+    return $ Name result s
+
+withPos :: DeltaParsing m => m (Span -> a) -> m a
+withPos p = do
+    (result :~ pos) <- spanned p
+    return $ result pos
+
+horizontalSpace :: Parser Int
 horizontalSpace = do
     start <- column <$> position
     many . satisfy $ \c -> isSpace c && c `notElem` "\n\r"
     end <- column <$> position
-    return $ end - start
+    return . fromIntegral $ end - start
 
 indent :: Parser ()
 indent = try $ do
     i <- horizontalSpace
     gets snd >>= \case
-        [] -> guard (i == 0)
-        (Indent j:_) -> guard (i == j)
-        (NewLayout:[]) -> guard (i > 0)
-        (NewLayout:Indent j:_) -> guard (i > j)
-        _ -> empty
+        (j:_) -> guard (i == j)
+        _     -> guard (i == 0)
 
 lineComment :: Parser ()
-lineComment = reserve varOp "--" >> void (manyTill anyChar newline)
+lineComment = highlight Comment $
+    reserve varOp "--" >> void (manyTill anyChar newline)
 
 multiLineComment :: Parser ()
-multiLineComment = void $ do
+multiLineComment = void . highlight Comment $ do
     try (string "{-")
     manyTill (multiLineComment <|> void anyChar) (string "-}")
 
@@ -82,23 +105,6 @@ lineRemainder = try $ do
 blankLine :: Parser ()
 blankLine = void $ lineRemainder >> newline
 
-lineSeparated :: Parser a -> Parser [a]
-lineSeparated p = p `sepEndBy` lineSep
-  where
-    lineSep :: Parser ()
-    lineSep = try $ do
-        void newline
-        many blankLine
-        indent
-
-indented :: Parser a -> Parser a
-indented p = do
-    modify $ second (NewLayout:)
-    result <- p
-    modify $ second tail
-    someSpace
-    return result
-
 instance Monoid a => Monoid (Parser a) where
     mempty = pure mempty
     mappend (Parser x) (Parser y) = Parser $ mappend <$> x <*> y
@@ -107,28 +113,32 @@ instance Errable Parser where
     raiseErr = Parser . lift . raiseErr
 
 instance TokenParsing Parser where
-    token p = do
-        gets snd >>= \case
-            (NewLayout:layouts) -> do
-                i <- column <$> position
-                modify . second $ const (Indent i:layouts)
-            _ -> return ()
+    semi = try $ do
+        void newline
+        many blankLine
+        indent
+        return ';'
 
-        p <* (someSpace <|> pure ())
+    nesting p = do
+        i <- fromIntegral . column <$> position
+        gets snd >>= \case
+            (j:_) -> guard (i > j)
+            _     -> guard (i > 0)
+        modify $ second (i:)
+        result <- p
+        modify $ second tail
+        someSpace
+        return result
 
     someSpace = do
         horizontalSpace
-        skipOptional lineCont
-
-      where
-        lineCont = void . try $ do
+        skipOptional . try $ do
             newline
             many blankLine
             i <- horizontalSpace
             gets snd >>= \case
-                (Indent j:_)  -> guard (i > j)
-                (NewLayout:_) -> empty
-                _             -> guard (i > 0)
+                (j:_) -> guard (i > j)
+                _     -> guard (i > 0)
 
 varId :: TokenParsing m => IdentifierStyle m
 varId = IdentifierStyle

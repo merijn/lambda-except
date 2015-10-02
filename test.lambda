@@ -2,14 +2,17 @@ data Bool where
   True :: Bool
   False :: Bool
 
-not :: Bool -> Bool
-foo :: (Bool -> Bool) -> Bool
 main :: Bool
 
+not :: Bool -> Bool
 not = \(b :: Bool) -> case b of
     True -> False
     _ -> True
 
-foo = \(f :: Bool -> Bool) -> f True
+foo :: (Bool -> Bool) -> Bool
+foo    = \(f :: Bool -> Bool) -> f (f True)
+
+bar :: (Bool -> Bool -> Bool) -> Bool
+bar    = \(f :: Bool -> Bool -> Bool) -> f True True
 
 main = foo not
