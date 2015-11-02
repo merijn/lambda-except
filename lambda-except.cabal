@@ -20,13 +20,15 @@ Synopsis:
 
 Description:
 
-Executable main
+Executable lambda-except
   Default-Language:     Haskell2010
   GHC-Options:          -O0 -Wall -fno-warn-unused-do-bind
                         -fno-warn-unticked-promoted-constructors
   Main-Is:              Main.hs
   Other-Modules:        AST
+                        Errors
                         Eval
+                        Lexer
                         Parser
                         PrettyPrint
                         TypeCheck
