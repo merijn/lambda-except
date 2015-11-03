@@ -21,6 +21,7 @@ data Error
     | DupPatBind Name
     | MissType Name
     | MissDef Name
+    | UnboundTypeVar Name
     deriving (Show)
 
 dupType :: [Name] -> Errors
@@ -44,11 +45,14 @@ missType = map MissType
 missDef :: [Name] -> Errors
 missDef = map MissDef
 
+unboundTypeVar :: [Name] -> Errors
+unboundTypeVar = map UnboundTypeVar
+
 reportDuplicates :: String -> [Name] -> Doc
 reportDuplicates desc = vsep . map reportDuplicate . group
   where
-    printLoc :: Span -> Doc
-    printLoc s = prettySpan s <$> prettySource s
+    printLoc :: Loc -> Doc
+    printLoc s = prettyLoc s <$> prettySource s
 
     reportDuplicate :: [Name] -> Doc
     reportDuplicate [] = error "Can't happen"
@@ -58,7 +62,7 @@ reportDuplicates desc = vsep . map reportDuplicate . group
                , text "for"
                , bold (prettify n) <> text ":"
                ]
-        , indent 4 . vsep . map printLoc . sort $ ns^..folded.span
+        , indent 4 . vsep . map printLoc . sort $ ns^..folded.location
         ]
 
 reportMissing :: String -> Name -> Doc
@@ -68,8 +72,8 @@ reportMissing desc n = vsep
          , text "for"
          , bold (prettify n) <> text ":"
          ]
-  , prettySpan (n^.span)
-  , prettySource (n^.span)
+  , prettyLoc (n^.location)
+  , prettySource (n^.location)
   ]
 
 reportErrors :: Errors -> Doc
@@ -84,6 +88,7 @@ reportErrors es = goDup
     [ ("type annotation", [n | MissType n <- es])
     , ("definition", [n | MissDef n <- es])
     ]
+    <> vsep (map reportUnbound [n | UnboundTypeVar n <- es])
   where
     goDup :: [(String, [Name])] -> Doc
     goDup [] = empty
@@ -105,3 +110,11 @@ reportErrors es = goDup
           errs :: Doc
           errs = vsep $ map (reportMissing desc) names
 
+    reportUnbound :: Name -> Doc
+    reportUnbound n = vsep
+        [ hsep [ string "Unbound type variable"
+               , bold (prettify n) <> text ":"
+               ]
+        , prettyLoc (n^.location)
+        , prettySource (n^.location)
+        ]

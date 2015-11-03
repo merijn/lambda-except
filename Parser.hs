@@ -3,9 +3,11 @@
 {-# LANGUAGE TupleSections #-}
 module Parser (parseFromFile, parseFromData, moduleParser, expr) where
 
-import Control.Applicative
-import Control.Lens hiding (cons)
+import Prelude hiding (pi, span)
+import Control.Applicative hiding (Const)
+import Control.Arrow ((&&&))
 import Data.Bifunctor
+import Data.Monoid ((<>))
 
 import AST
 import Errors
@@ -21,11 +23,11 @@ parseUniq f = parseValid f . buildUniqMap
 
 data Declaration
     = Definition Name (Expr Name)
-    | TypeAnn Name Type
+    | TypeAnn Name (Expr Name)
     deriving (Eq,Ord,Show)
 
 data TopLevelDeclaration
-    = DataType DataType
+    = DataType (Data Name)
     | Decl Declaration
     deriving (Eq,Ord,Show)
 
@@ -36,30 +38,32 @@ moduleParser = do
 
     let rawTypes = [x | DataType x <- contents]
 
-    types <- parseUniq dupData [(x^.dataName, x) | x <- rawTypes]
-    cons <- parseUniq dupCon . concatMap addTypeToTypeCons $ rawTypes
-    decls <- buildDecls [x | Decl x <- contents]
-    return $ Module types cons decls
+    types <- parseUniq dupData [(x^.name, x) | x <- rawTypes]
+    constructors <- parseUniq dupCon . getCons $ rawTypes
+    declarations <- buildDecls [x | Decl x <- contents]
+    return $ Module types constructors declarations
   where
-    addTypeToTypeCons :: DataType -> [(Name, (Type, DataType))]
-    addTypeToTypeCons t = ifoldMapOf (dataCons.ifolded) wrap t
-      where wrap i x = [(i, (x, t))]
+    getCons = foldMap $ foo <> view (cons.to assocs)
+    foo :: Data a -> [(Name, Expr a)]
+    foo = pure . (view name &&& view type_)
 
-dataParser :: Parser DataType
+dataParser :: Parser (Data Name)
 dataParser = do
     reserve varId "data"
-    typeName <- name conId
+    dataName <- nameId conId
+    reserve conOp ":"
+    kind <- expr
     reserve varId "where"
-    constructors <- nesting $ constructor `sepEndBy` semi
-    Data typeName <$> parseUniq dupCon constructors
+    constructors <- nesting $ dataConstructor `sepEndBy` semi
+    Data dataName kind <$> parseUniq dupCon constructors
 
-constructor :: Parser (Name, Type)
-constructor = (,) <$> name conId <* reserve conOp "::" <*> typeParser
+dataConstructor :: Parser (Name, Expr Name)
+dataConstructor = (,) <$> nameId conId <* reserve conOp ":" <*> expr
 
 buildDecls :: [Declaration] -> Parser (Decls Name)
-buildDecls decls = do
-    types <- parseUniq dupType [(n, t) | TypeAnn n t <- decls]
-    defs <- parseUniq dupDef [(n, b) | Definition n b <- decls]
+buildDecls decs = do
+    types <- parseUniq dupType [(n, t) | TypeAnn n t <- decs]
+    defs <- parseUniq dupDef [(n, b) | Definition n b <- decs]
 
     let decMap | null types || null defs = pure mempty
                | otherwise = intersectUniq (,) defs types
@@ -67,66 +71,85 @@ buildDecls decls = do
     scopify <$> parseValid combineErrors decMap
   where
     combineErrors (ty, binds) = map MissType ty ++ map MissDef binds
-    scopify d = first (abstractKeys d) <$> d
+    scopify d = bimap (abstractKeys d) (abstractKeys d) <$> d
 
 declaration :: Parser Declaration
 declaration = do
-    declName <- name varId
+    declName <- nameId varId
     definition declName <|> typeAnnotation declName
   where
     definition :: Name -> Parser Declaration
     definition n = Definition n <$ reserve varOp "=" <*> expr
 
     typeAnnotation :: Name -> Parser Declaration
-    typeAnnotation n = TypeAnn n <$ reserve conOp "::" <*> typeParser
-
-typeParser :: Parser Type
-typeParser = arrType <|> primType
-  where
-    primType = parens typeParser <|> withPos (TyCon <$> ident conId)
-
-    arrType = withPos $ do
-        type1 <- try $ primType <* reserve varOp "->"
-        type2 <- typeParser
-        return $ TyArr type1 type2
+    typeAnnotation n = TypeAnn n <$ reserve conOp ":" <*> expr
 
 expr :: Parser (Expr Name)
-expr = chainl1 primExpr (pure app)
-  where
-    app e1 e2 = App e1 e2 $ Span begin end s
-      where
-        Span begin _ s = e1^?!spans
-        Span _ end _ = e2^?!spans
+expr = choice
+    [ lambda
+    , pi
+    , typeLambda
+    , forall
+    , arrow
+    , letBlock
+    , caseOf
+    , appExpr
+    ]
 
-    primExpr = choice
-        [ parens expr
-        , lambda
-        , letBlock
-        , caseOf
-        , conExpr
-        , intExpr
-        , variable
-        ]
+appExpr :: Parser (Expr Name)
+appExpr = chainl1 primExpr (pure app)
+  where
+    app :: Expr Name -> Expr Name -> Expr Name
+    app e1 e2 = App e1 e2 $ Loc (Span begin end s)
+      where
+        Span begin _ s = e1^.location.span
+        Span _ end _ = e2^.location.span
 
 lambda :: Parser (Expr Name)
 lambda = withPos $ do
     reserve varOp "\\"
-    (var, ty) <- parens binding <|> binding
+    (var, ty) <- typedBinding
     reserve varOp "->"
     body <- expr
-    return $ Lambda var ty (abstract1 var body)
-  where
-    binding = (,) <$> name varId <*> bindType
-    bindType = try (reserve varOp "::") *> (Just <$> typeParser)
-           <|> pure Nothing
+    return $ Lambda var ty (abstractPat var body)
+
+pi :: Parser (Expr Name)
+pi = withPos $ do
+    reserve varOp "|~|" <|> reserve conId "Π"
+    (var, ty) <- typedBinding
+    reserve varOp "."
+    body <- expr
+    return $ Pi var ty (abstractPat var body)
+
+typeLambda :: Parser (Expr Name)
+typeLambda = withPos $ do
+    reserve varOp "/\\" <|> reserve conId "Λ"
+    (var, ty) <- typedBinding
+    reserve varOp "."
+    body <- expr
+    return $ Lambda var ty (abstractPat var body)
+
+forall :: Parser (Expr Name)
+forall = withPos $ do
+    reserve varOp "\\/" <|> reserve varOp "∀" <|> reserve varId "forall"
+    var <- simplePattern
+    reserve varOp "."
+    body <- expr
+    return $ Pi var (Const Star (var^.location)) (abstractPat var body)
+
+arrow :: Parser (Expr Name)
+arrow = withPos $ do
+    e1 <- try $ appExpr <* reserve varOp "->"
+    e2 <- expr
+    return $ \s -> let pat = WildP s in Pi pat e1 (abstractPat pat e2) s
 
 letBlock :: Parser (Expr Name)
 letBlock = withPos $ do
     reserve varId "let"
-    decls <- buildDecls =<< nesting (declaration `sepEndBy` semi)
+    decs <- buildDecls =<< nesting (declaration `sepEndBy` semi)
     reserve varId "in"
     body <- expr
-    return $ Let decls (abstractKeys decls body)
+    return $ Let decs (abstractKeys decs body)
 
 caseOf :: Parser (Expr Name)
 caseOf = withPos $ do
@@ -145,18 +168,37 @@ alternative = withPos $ do
     return $ Alt pat (abstractPos pat body)
 
 pattern :: Parser (Pat Name)
-pattern = parens pattern <|> choice (map withPos
-    [ WildP <$ reserve varId "_"
-    , AsP <$> try (name varId <* reserve varId "@") <*> pattern
-    , VarP <$> name varId
-    , ConP <$> name conId <*> many pattern
-    ])
+pattern = parens pattern <|> choice
+    [ withPos $ AsP <$> try (nameId varId <* reserve varId "@") <*> pattern
+    , Simple <$> simplePattern
+    , withPos $ ConP <$> nameId conId <*> many pattern
+    ]
 
-conExpr :: Parser (Expr Name)
-conExpr = withPos $ Con <$> name conId <*> pure []
+simplePattern :: Parser (SimplePat Name)
+simplePattern = withPos $ choice
+    [ VarP <$> nameId varId
+    , WildP <$ reserve varId "_"
+    ]
 
-intExpr :: Parser (Expr Name)
-intExpr = withPos $ Int <$> integer
+primExpr :: Parser (Expr Name)
+primExpr = choice [variable, constructor, star, parens expr]
 
 variable :: Parser (Expr Name)
-variable = withPos $ LocVar <$> name varId
+variable = untyped
+  where
+    untyped :: Parser (Expr Name)
+    untyped = withPos $ LocVar <$> nameId varId
+
+typedBinding :: Parser (SimplePat Name, Expr Name)
+typedBinding = parens tvar <|> tvar
+  where
+    tvar = do
+        n <- try $ simplePattern <* reserve varOp ":"
+        t <- expr
+        return (n, t)
+
+constructor :: Parser (Expr Name)
+constructor = withPos $ Con <$> nameId conId <*> pure []
+
+star :: Parser (Expr Name)
+star = withPos $ Const Star <$ reserve varOp "*"

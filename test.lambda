@@ -1,18 +1,18 @@
-data Bool where
-  True :: Bool
-  False :: Bool
+data Bool : * where
+  True : Bool
+  False : Bool
 
-main :: Bool
+main : Bool
 
-not :: Bool -> Bool
-not = \(b :: Bool) -> case b of
+not : Bool -> Bool
+not = \(b : Bool) -> case b of
     True -> False
     _ -> True
 
-foo :: (Bool -> Bool) -> Bool
-foo    = \(f :: Bool -> Bool) -> f (f True)
+foo : (Bool -> Bool) -> Bool
+foo    = \(f : Bool -> Bool) -> f (f True)
 
-bar :: (Bool -> Bool -> Bool) -> Bool
-bar    = \(f :: Bool -> Bool -> Bool) -> f True True
+bar : (Bool -> Bool -> Bool) -> Bool
+bar    = \(f : Bool -> Bool -> Bool) -> f True True
 
 main = foo not

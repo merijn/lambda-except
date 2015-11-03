@@ -1,2 +1,2 @@
-data Unit where
+data Unit :: * where
   Unit :: Bool

@@ -7,7 +7,7 @@ module Lexer
     , parseFromFile
     , parseFromData
     , parseValid
-    , name
+    , nameId
     , withPos
     , varId
     , conId
@@ -61,16 +61,16 @@ parseValid f p = case p of
     Failure n -> modify (first . mappend . f $ n) >> return mempty
     Success result -> return result
 
-name :: IdentifierStyle (Unspaced Parser) -> Parser Name
-name style = do
+nameId :: IdentifierStyle (Unspaced Parser) -> Parser Name
+nameId style = do
     (result :~ s) <- spanned . runUnspaced $ ident style
     someSpace
-    return $ Name result s
+    return $ Name result (Loc s)
 
-withPos :: DeltaParsing m => m (Span -> a) -> m a
+withPos :: DeltaParsing m => m (Loc -> a) -> m a
 withPos p = do
     (result :~ pos) <- spanned p
-    return $ result pos
+    return $ result (Loc pos)
 
 horizontalSpace :: Parser Int
 horizontalSpace = do
@@ -145,8 +145,8 @@ varId = IdentifierStyle
     { _styleName = "variable identifier"
     , _styleStart = lower
     , _styleLetter = alphaNum <|> oneOf "_'"
-    , _styleReserved = [ "if", "then", "else", "let", "in", "case", "of"
-                       , "_", "data", "where"]
+    , _styleReserved = [ "let", "in", "case", "of" , "_", "data", "where"
+                       , "forall"]
     , _styleHighlight = Identifier
     , _styleReservedHighlight = ReservedIdentifier
     }
@@ -156,7 +156,7 @@ conId = IdentifierStyle
     { _styleName = "constructor identifier"
     , _styleStart = upper
     , _styleLetter = alphaNum <|> oneOf "_'"
-    , _styleReserved = []
+    , _styleReserved = ["Λ", "Π"]
     , _styleHighlight = Constructor
     , _styleReservedHighlight = ReservedConstructor
     }
@@ -164,9 +164,10 @@ conId = IdentifierStyle
 varOp :: TokenParsing m => IdentifierStyle m
 varOp = IdentifierStyle
     { _styleName = "variable operator"
-    , _styleStart = oneOf "!#$%&*+./<=>?@\\^|-~"
+    , _styleStart = oneOf "!#$%&*+./<=>?@\\^|-~" <|> satisfy isSymbol
     , _styleLetter = _styleStart varOp <|> char ':'
-    , _styleReserved = ["=", "\\", "->", "=>", "--", "@"]
+    , _styleReserved = [ "=", "\\", "->", "--", "@", "*", "|~|", "/\\"
+                       , "\\/", "∀", "."]
     , _styleHighlight = Operator
     , _styleReservedHighlight = ReservedOperator
     }
@@ -175,8 +176,8 @@ conOp :: TokenParsing m => IdentifierStyle m
 conOp = IdentifierStyle
     { _styleName = "constructor operator"
     , _styleStart = char ':'
-    , _styleLetter = _styleStart conOp <|> oneOf "!#$%&*+./<=>?@\\^|-~"
-    , _styleReserved = ["::"]
+    , _styleLetter = _styleStart conOp <|> _styleStart varOp
+    , _styleReserved = [":"]
     , _styleHighlight = ConstructorOperator
     , _styleReservedHighlight = ReservedConstructorOperator
     }

@@ -4,130 +4,125 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ViewPatterns #-}
 module AST
-    ( Type(..)
-    , getResultType
-    , DataType(..)
-    , Module(..)
-    , Name(..)
+    ( Name(..)
     , Named(..)
-    , NamedType
     , NamedVar
+    , Type(..)
+    , Data(..)
+    , Module(..)
     , Decls
+    , Const(..)
     , Expr(..)
+    , SimplePat(..)
     , Pat(..)
     , Alt(..)
     , abstractKeys
     , abstractPos
     , instantiate
     , instantiateNamed
-    , abstract1
+    , abstractPat
     , stripName
+    , Void
+    , absurd
+    , vacuous
+    , HasName(..)
+    , HasType(..)
+    , HasCons(..)
+    , HasDatas(..)
+    , HasDecls(..)
     , Span(..)
-    , span
-    , spans
-    , HasDataType(..)
-    , HasModule(..)
+    , HasSpan(..)
+    , Loc(..)
+    , HasLoc(..)
     , module Bound
+    , module Control.Lens
     ) where
 
 import Prelude hiding (span)
 import Prelude.Extras
 
-import Bound hiding (instantiate, abstract1)
+import Bound hiding (instantiate)
 import qualified Bound
-import Control.Lens
+import Control.Lens hiding (Const, cons)
 import Control.Monad
 import Data.Foldable (toList)
 import Data.List (elemIndex)
+import Data.Void
 import Text.Trifecta.Rendering (Span(..), HasSpan(..))
 
 import UniqMap
 
-data Name = Name String Span deriving (Show)
+newtype Loc = Loc Span
 
-instance Eq Name where
-    Name n1 _ == Name n2 _ = n1 == n2
+instance Show Loc where
+    show _ = ""
 
-instance Ord Name where
-    Name n1 _ `compare` Name n2 _ = n1 `compare` n2
+instance Eq Loc where
+    _ == _ = True
 
-instance HasSpan Name where
-    span f (Name n s) = Name n <$> f s
+instance Ord Loc where
+    compare _ _ = EQ
+
+data Name = Name String Loc deriving (Show)
 
 data Named a = Named Name a
     deriving (Eq,Foldable,Functor,Ord,Show,Traversable)
 
-type NamedType = Named Type
 type NamedVar = Named Int
 
-data Type = TyCon String Span | TyArr Type Type Span | TyAny Span
-    deriving (Eq,Ord,Show)
+newtype Type = Type (Expr (Named Type))
+    deriving (Eq,Show)
 
-getResultType :: Type -> Type
-getResultType (TyArr _ t _) = getResultType t
-getResultType t = t
-
-data DataType = Data
+data Data a = Data
     { _dataName :: Name
-    , _dataCons :: UniqMap Name Type
+    , _dataKind :: Expr a
+    , _dataCons :: UniqMap Name (Expr a)
     }
-    deriving (Eq,Ord,Show)
+    deriving (Eq,Foldable,Functor,Ord,Show,Traversable)
 
 data Module a = Module
-    { _modTypes :: UniqMap Name DataType
-    , _modCons :: UniqMap Name (Type, DataType)
+    { _modDatas :: UniqMap Name (Data a)
+    , _modCons :: UniqMap Name (Expr a)
     , _modDecls :: Decls a
     }
     deriving (Eq,Foldable,Functor,Ord,Show,Traversable)
 
-type Decls a = UniqMap Name (Scope NamedVar Expr a, Type)
+type Decls a = UniqMap Name (Scope NamedVar Expr a, Scope NamedVar Expr a)
+
+data Const = Star | Box deriving (Eq,Ord,Show)
 
 data Expr a
-  = App (Expr a) (Expr a) Span
-  | Let (Decls a) (Scope NamedVar Expr a) Span
-  | Lambda Name (Maybe Type) (Scope (Named ()) Expr a) Span
-  | Case (Expr a) [Alt Expr a] Span
-  | Con Name [Expr a] Span
-  | Int Integer Span
-  | LocVar a Span
+  = Const Const Loc
   | Var a
-  deriving (Eq,Foldable,Functor,Ord,Show,Traversable)
+  | LocVar a Loc
+  | Con Name [Expr a] Loc
+  | Lambda (SimplePat Name) (Expr a) (Scope (Named ()) Expr a) Loc
+  | Pi (SimplePat Name) (Expr a) (Scope (Named ()) Expr a) Loc
+  | App (Expr a) (Expr a) Loc
+  | Case (Expr a) [Alt Expr a] Loc
+  | Let (Decls a) (Scope NamedVar Expr a) Loc
+  deriving (Foldable,Functor,Ord,Show,Traversable)
 
-instance Eq1 Expr
-instance Ord1 Expr
-instance Show1 Expr
-
-instance Applicative Expr where
-    pure = return
-    (<*>) = ap
-
-instance Monad Expr where
-    return = Var
-    App e1 e2 loc           >>= f = App (e1 >>= f) (e2 >>= f) loc
-    Lambda i names body loc >>= f = Lambda i names (body >>>= f) loc
-    Let decls body loc      >>= f = Let (helper <$> decls) (body >>>= f) loc
-      where helper (e, ty) = (e >>>= f, ty)
-    Case e alts loc         >>= f = Case (e >>= f) (map (>>>= f) alts) loc
-    Con s args loc          >>= f = Con s (map (>>=f) args) loc
-    Int i loc               >>= _ = Int i loc
-    LocVar x _              >>= f = f x
-    Var x                   >>= f = f x
+data SimplePat a
+  = WildP Loc
+  | VarP a Loc
+  deriving (Eq,Ord,Show,Functor,Foldable,Traversable)
 
 data Pat a
-  = VarP a Span
-  | WildP Span
-  | AsP a (Pat a) Span
-  | ConP Name [Pat a] Span
+  = Simple (SimplePat a)
+  | AsP a (Pat a) Loc
+  | ConP Name [Pat a] Loc
   deriving (Eq,Ord,Show,Functor,Foldable,Traversable)
 
-data Alt f a = Alt (Pat Name) (Scope NamedVar f a) Span
+data Alt f a = Alt (Pat Name) (Scope NamedVar f a) Loc
   deriving (Eq,Ord,Show,Functor,Foldable,Traversable)
 
-instance Bound Alt where
-  Alt p b l >>>= f = Alt p (b >>>= f) l
+-- Functions
 
 nameIt :: Functor f => (Name -> f a) -> Name -> f (Named a)
 nameIt f n = Named n <$> f n
@@ -145,35 +140,161 @@ instantiateNamed
     :: Monad f => (b -> a) -> Scope (Named b) f (Named a) -> f (Named a)
 instantiateNamed f = Bound.instantiate (pure . fmap f)
 
-abstract1 :: (Monad f) => Name -> f Name -> Scope (Named ()) f Name
-abstract1 x = abstract checkName
+abstractPat
+    :: (HasName a, Monad f)
+    => SimplePat Name
+    -> f a
+    -> Scope (Named ()) f a
+abstractPat WildP{} = abstract (const Nothing)
+abstractPat (VarP n _) = abstract checkName
   where
-    checkName y | x == y = Just $ Named y ()
-                | otherwise = Nothing
+    checkName (view name -> y)
+        | n == y = Just $ Named y ()
+        | otherwise = Nothing
 
 stripName :: Named a -> a
 stripName (Named _ x) = x
 
-class MightHaveSpan a where
-    spans :: Traversal' a Span
+-- Classes
 
-instance MightHaveSpan (Expr a) where
-    spans f expr = case expr of
-        App e1 e2 l -> App e1 e2 <$> f l
-        Let binds body l -> Let binds body <$> f l
-        Lambda name ty body l -> Lambda name ty body <$> f l
-        Case e alts l -> Case e alts <$> f l
-        Con s args l -> Con s args <$> f l
-        Int i l -> Int i <$> f l
+class HasLoc a where
+    location :: Lens' a Loc
+
+class HasName a where
+    name :: Lens' a Name
+
+class HasType f where
+    type_ :: Lens' (f a) (Expr a)
+
+class HasCons f where
+    cons :: Lens' (f a) (UniqMap Name (Expr a))
+
+class HasDatas f where
+    datas :: Lens' (f a) (UniqMap Name (Data a))
+
+class HasDecls f where
+    decls :: Lens' (f a) (Decls a)
+
+-- Instances
+
+instance HasSpan Loc where
+    span f (Loc s) = Loc <$> f s
+
+instance HasLoc Loc where
+    location = id
+
+
+
+instance Eq Name where
+    Name n1 _ == Name n2 _ = n1 == n2
+
+instance Ord Name where
+    Name n1 _ `compare` Name n2 _ = n1 `compare` n2
+
+instance HasName Name where
+    name = id
+
+instance HasLoc Name where
+    location f (Name n s) = Name n <$> f s
+
+
+
+instance HasName (Named a) where
+    name f (Named n x) = (\n' -> Named n' x) <$> f n
+
+instance HasLoc a => HasLoc (Named a) where
+    location f (Named n x) = Named n <$> location f x
+
+
+
+instance HasLoc Type where
+    location f (Type e) = Type <$> location f e
+
+
+
+instance HasName (Data a) where
+    name f t = (\n -> t { _dataName = n }) <$> f (_dataName t)
+
+instance HasType Data where
+    type_ f t = (\e -> t { _dataKind = e }) <$> f (_dataKind t)
+
+instance HasCons Data where
+    cons f t = (\cs -> t { _dataCons = cs }) <$> f (_dataCons t)
+
+
+
+instance HasCons Module where
+    cons f t = (\cs -> t { _modCons = cs }) <$> f (_modCons t)
+
+instance HasDatas Module where
+    datas f t = (\cs -> t { _modDatas = cs }) <$> f (_modDatas t)
+
+instance HasDecls Module where
+    decls f t = (\cs -> t { _modDecls = cs }) <$> f (_modDecls t)
+
+
+
+instance Eq1 Expr
+instance Ord1 Expr
+instance Show1 Expr
+
+instance Eq a => Eq (Expr a) where
+    Const c1 _ == Const c2 _ = c1 == c2
+    Var x == Var y = x == y
+    LocVar x _ == LocVar y _ = x == y
+    Var x == LocVar y _ = x == y
+    LocVar x _ == Var y = x == y
+    Con n1 es1 _ == Con n2 es2 _ = n1 == n2 && es1 == es2
+    Lambda _ ty1 body1 _ == Lambda _ ty2 body2 _ = ty1 == ty2 && body1 == body2
+    Pi _ ty1 body1 _ == Pi _ ty2 body2 _ = ty1 == ty2 && body1 == body2
+    App e11 e12 _ == App e21 e22 _ = e11 == e21 && e12 == e22
+    Case e1 alts1 _ == Case e2 alts2 _ = e1 == e2 && alts1 == alts2
+    Let decls1 body1 _ == Let decls2 body2 _ = decls1 == decls2 && body1 == body2
+    _ == _ = False
+
+instance Applicative Expr where
+    pure = return
+    (<*>) = ap
+
+instance Monad Expr where
+    return = Var
+    Const c loc          >>= _ = Const c loc
+    Var x                >>= f = f x
+    LocVar x _           >>= f = f x
+    Con s args loc       >>= f = Con s (map (>>=f) args) loc
+    Lambda n ty body loc >>= f = Lambda n (ty >>= f) (body >>>= f) loc
+    Pi n ty body loc     >>= f = Pi n (ty >>= f) (body >>>= f) loc
+    App e1 e2 loc        >>= f = App (e1 >>= f) (e2 >>= f) loc
+    Case e alts loc      >>= f = Case (e >>= f) (map (>>>= f) alts) loc
+    Let decs body loc   >>= f = Let (go <$> decs) (body >>>= f) loc
+      where go (e, ty) = (e >>>= f, ty >>>= f)
+
+instance HasLoc a => HasLoc (Expr a) where
+    location f expr = case expr of
+        Const c l -> Const c <$> f l
+        Var x -> LocVar x <$> f (x^.location)
         LocVar x l -> LocVar x <$> f l
-        Var x -> pure $ Var x
+        Con s args l -> Con s args <$> f l
+        Lambda n ty body l -> Lambda n ty body <$> f l
+        Pi n ty body l -> Pi n ty body <$> f l
+        App e1 e2 l -> App e1 e2 <$> f l
+        Case e alts l -> Case e alts <$> f l
+        Let binds body l -> Let binds body <$> f l
 
-instance HasSpan Type where
-    span f ty = case ty of
-        TyAny l -> TyAny <$> f l
-        TyCon s l -> TyCon s <$> f l
-        TyArr t1 t2 l -> TyArr t1 t2 <$> f l
 
-makeClassy ''DataType
-makeClassyFor "HasModule" "module_" [("_modTypes", "modTypes"),
-    ("_modCons", "modCons"), ("_modDecls", "modDecls")] ''Module
+
+instance HasLoc (SimplePat a) where
+    location f pat = case pat of
+        WildP l -> WildP <$> f l
+        VarP n l -> VarP n <$> f l
+
+instance HasLoc (Pat a) where
+    location f pat = case pat of
+        Simple p -> Simple <$> location f p
+        AsP n p l -> AsP n p <$> f l
+        ConP n ps l -> ConP n ps <$> f l
+
+
+
+instance Bound Alt where
+  Alt p b l >>>= f = Alt p (b >>>= f) l

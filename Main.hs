@@ -25,7 +25,7 @@ evaluate m = do
                 Left e -> putDoc e >> putStrLn ""
                 Right _ -> exprLoop tyModule
   where
-    exprLoop :: Module NamedType -> IO ()
+    exprLoop :: Module (Named Type) -> IO ()
     exprLoop tyModule = forever $ do
         putStr "> "
         input <- getLine
@@ -35,9 +35,9 @@ evaluate m = do
             Success e -> evalExpr tyModule e
         putStrLn ""
 
-    evalExpr :: Module NamedType -> Expr Name -> IO ()
+    evalExpr :: Module (Named Type) -> Expr Name -> IO ()
     evalExpr tyModule e = do
-        let scopedExpr = abstractKeys (tyModule^.modDecls) e
+        let scopedExpr = abstractKeys (tyModule^.decls) e
         case typeCheckExpr tyModule <$> closed scopedExpr of
             Nothing -> putStrLn "Expression has free variables!"
             Just (Left err) -> putDoc err >> putStrLn ""

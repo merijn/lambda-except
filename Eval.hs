@@ -2,7 +2,6 @@
 {-# LANGUAGE ViewPatterns #-}
 module Eval where
 
-import Control.Lens
 import Data.Bifunctor
 import Data.Maybe
 
@@ -10,9 +9,9 @@ import AST
 import UniqMap
 
 instantiateDecls :: Decls a -> Scope NamedVar Expr a -> Expr a
-instantiateDecls decls = inst
+instantiateDecls decs = inst
   where
-    es = fmap (first inst) decls
+    es = fmap (first inst) decs
     inst = instantiate (fst . exprAt es)
 
 matchPatWithEval
@@ -26,8 +25,8 @@ matchPatWithEval eval expr (Alt pat body _) = inst . snd <$> match pat expr
     inst bindings = instantiate ((bindings !!)) body
 
     match :: Pat Name -> Expr a -> Maybe (Expr a, [Expr a])
-    match (VarP _ _) e = Just (e, [e])
-    match WildP{} e = Just (e, [])
+    match (Simple (VarP _ _)) e = Just (e, [e])
+    match (Simple WildP{}) e = Just (e, [])
     match (AsP _ pats _) e
       | Just (e', ms) <- match pats e = Just (e', e':ms)
 
@@ -45,14 +44,21 @@ matchPatWithEval eval expr (Alt pat body _) = inst . snd <$> match pat expr
     match _ _ = Nothing
 
 whnfWith :: Module Name -> Expr Name -> Expr Name
-whnfWith m e = whnf $ instantiateDecls decls (abstractKeys decls e)
-  where decls = m^.modDecls
+whnfWith m e = whnf $ instantiateDecls decs (abstractKeys decs e)
+  where decs = m^.decls
 
 nfWith :: Module Name -> Expr Name -> Expr Name
-nfWith m e = nf $ instantiateDecls decls (abstractKeys decls e)
-  where decls = m^.modDecls
+nfWith m e = nf $ instantiateDecls decs (abstractKeys decs e)
+  where decs = m^.decls
 
 whnf :: Expr a -> Expr a
+whnf expr@Const{} = expr
+whnf expr@Var{} = expr
+whnf expr@LocVar{} = expr
+whnf expr@Con{} = expr
+whnf expr@Lambda{} = expr
+whnf expr@Pi{} = expr
+
 whnf (App t1 t2 l)
     | Lambda _ _ body _ <- fun = whnf $ instantiate1 t2 body
     | (Con s es loc) <- fun = Con s (es ++ [t2]) loc
@@ -65,15 +71,16 @@ whnf (Case expr alts _) =
     [] -> error "Incomplete pattern!"
     (x:_) -> x
 
-whnf (Let decls body _) = whnf $ instantiateDecls decls body
-
-whnf expr@Lambda{} = expr
-whnf expr@Con{} = expr
-whnf expr@Int{} = expr
-whnf expr@LocVar{} = expr
-whnf expr@Var{} = expr
+whnf (Let decs body _) = whnf $ instantiateDecls decs body
 
 nf :: Expr a -> Expr a
+nf expr@Const{} = expr
+nf expr@Var{} = expr
+nf expr@LocVar{} = expr
+nf (Con s args l) = Con s (map nf args) l
+nf (Lambda n t body l) = Lambda n t (toScope . nf . fromScope $ body) l
+nf (Pi n t1 t2 l) = Pi n (nf t1) (toScope . nf . fromScope $ t2) l
+
 nf (App t1 t2 l) = case whnf t1 of
     Lambda _ _ body _ -> nf $ instantiate1 t2 body
     Con s es loc -> nf $ Con s (es ++ [t2]) loc
@@ -83,7 +90,7 @@ nf (Case (nf -> expr) alts@(Alt pat _ _:_) l)
     | Var{} <- expr
     , notWildCard pat = Case expr alts l
   where
-    notWildCard WildP{} = False
+    notWildCard (Simple WildP{}) = False
     notWildCard _ = True
 
 nf (Case (nf -> expr) alts _) =
@@ -91,9 +98,4 @@ nf (Case (nf -> expr) alts _) =
     [] -> error "Incomplete pattern!"
     (x:_) -> nf x
 
-nf (Let decls body _) = nf $ instantiateDecls decls body
-nf (Lambda n t body l) = Lambda n t (toScope . nf . fromScope $ body) l
-nf (Con s args l) = Con s (map nf args) l
-nf expr@Int{} = expr
-nf expr@LocVar{} = expr
-nf expr@Var{} = expr
+nf (Let decs body _) = nf $ instantiateDecls decs body
