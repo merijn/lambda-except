@@ -158,11 +158,11 @@ typeOf (App e1 e2 _) = do
 
 typeOf (Case e alts _) = do
     t1 <- typeOf e
-    (t:types) <- forM alts $ \(Alt pat body _) -> do
+    (Type t:types) <- forM alts $ \(Alt pat body _) -> do
         ts <- pat `typeWith` t1
         typeOf $ instantiateNamed (ts!!) body
-    mapM_ (\x -> unify t x) types
-    return t
+    mapM_ (\(Type x) -> unify (Type $ nf t) (Type $ nf x)) types
+    return $ Type t
 
 typeOf (Let decs body _) = do
     checkDecls decs
