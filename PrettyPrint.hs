@@ -1,18 +1,25 @@
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE LambdaCase #-}
 module PrettyPrint
     ( prettyPrint
+    , outputPretty
+    , prettyString
+    , prettyString_
     , prettify
     , nested
     , prettyLoc
     , prettySource
-    , prettyString
+    , Prettify
     ) where
 
 import Prelude hiding ((<$>))
 import Bound
+import Control.Monad.Trans
 import Data.List (intersperse)
+import System.Console.Haskeline
+import System.Posix.IO.ByteString (stdInput)
+import System.Posix.Pty (createPty, ptyDimensions)
 import Text.PrettyPrint.ANSI.Leijen
 import Text.Trifecta.Delta (Delta(..), nextTab)
 import qualified Text.Trifecta.Rendering as Tri
@@ -23,23 +30,33 @@ import UniqMap
 prettyPrint :: Prettify a => a -> IO ()
 prettyPrint x = putDoc (prettify x) >> putStrLn ""
 
-dblLine :: Doc
-dblLine = line <> line
+outputPretty :: (MonadIO m, Prettify a) => a -> InputT m ()
+outputPretty val = do
+    liftIO (createPty stdInput) >>= \case
+        Nothing -> outputStrLn $ prettyString_ val
+        Just pty -> do
+            (x, _) <- liftIO $ ptyDimensions pty
+            outputStrLn $ prettyString x val
+
+prettyString :: Prettify a => Int -> a -> String
+prettyString w d = displayS (renderPretty 1 w $ prettify d) ""
+
+prettyString_ :: Prettify a => a -> String
+prettyString_ = prettyString 80
 
 prettify :: Prettify a => a -> Doc
 prettify = render False
 
+dblLine :: Doc
+dblLine = line <> line
+
 nested :: Prettify a => a -> Doc
 nested = render True
 
-keyword :: String -> Doc
-keyword = dullyellow . text
-
-operator :: String -> Doc
-operator = dullyellow . text
-
-declKeyword :: String -> Doc
-declKeyword = dullgreen . text
+nestedExpr :: Prettify a => Expr a -> Doc
+nestedExpr e
+    | isCompoundExpr e = nested e
+    | otherwise = prettify e
 
 prettyLoc :: Loc -> Doc
 prettyLoc (Loc (Span start end _)) =
@@ -56,13 +73,22 @@ prettyLoc (Loc (Span start end _)) =
 prettySource :: Loc -> Doc
 prettySource (Loc l) = pretty . Tri.render $ l
 
-prettyString :: Prettify a => a -> String
-prettyString d = displayS (renderPretty 0.4 80 $ prettify d) ""
+keyword :: String -> Doc
+keyword = dullyellow . text
+
+operator :: String -> Doc
+operator = dullyellow . text
+
+declKeyword :: String -> Doc
+declKeyword = dullgreen . text
 
 class Prettify a where
     render :: Bool -> a -> Doc
     default render :: Show a => Bool -> a -> Doc
     render _ = text . show
+
+instance Prettify Doc where
+    render _ = id
 
 instance Prettify Name where
     render _ (Name s _) = text s
@@ -71,7 +97,8 @@ instance Prettify a => Prettify (Named a) where
     render b (Named _ x) = render b x
 
 instance Prettify Type where
-    render b (Type e) = render b e
+    render _ (Type e) =
+      text "(??" <+> operator ":" <+> prettify e <> text ")"
 
 instance Prettify b => Prettify (Var (Named a) b) where
     render _ (B (Named n _)) = prettify n
@@ -134,7 +161,7 @@ instance Prettify a => Prettify (Expr a) where
 
     render isNested e@(Con s args _)
         | isNested = text "(" <> prettify e <> text ")"
-        | otherwise = fillSep (prettify s : map prettify args)
+        | otherwise = fillSep (prettify s : map nestedExpr args)
 
     render isNested e@(Lambda argName ty body _)
         | isNested = text "(" <> prettify e <> text ")"
@@ -158,7 +185,7 @@ instance Prettify a => Prettify (Expr a) where
 
     render isNested e@(App e1 e2 _)
         | isNested = text "(" <> prettify e <> text ")"
-        | otherwise = prettify e1 <+> nested e2
+        | otherwise = nestedExpr e1 <+> nestedExpr e2
 
     render _ (Case e alts _) = keyword "case" <+> prettify e <+> keyword "of"
         <$> indent 4 (vsep (map prettify alts))

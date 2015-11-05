@@ -6,13 +6,6 @@ import Data.Bifunctor
 import Data.Maybe
 
 import AST
-import UniqMap
-
-instantiateDecls :: Decls a -> Scope NamedVar Expr a -> Expr a
-instantiateDecls decs = inst
-  where
-    es = fmap (first inst) decs
-    inst = instantiate (fst . exprAt es)
 
 matchPatWithEval
     :: forall a . (Expr a -> Expr a)
@@ -44,11 +37,11 @@ matchPatWithEval eval expr (Alt pat body _) = inst . snd <$> match pat expr
     match _ _ = Nothing
 
 whnfWith :: Module Name -> Expr Name -> Expr Name
-whnfWith m e = whnf $ instantiateDecls decs (abstractKeys decs e)
+whnfWith m e = whnf $ instantiateExpr decs (abstractKeys decs e)
   where decs = m^.decls
 
 nfWith :: Module Name -> Expr Name -> Expr Name
-nfWith m e = nf $ instantiateDecls decs (abstractKeys decs e)
+nfWith m e = nf $ instantiateExpr decs (abstractKeys decs e)
   where decs = m^.decls
 
 whnf :: Expr a -> Expr a
@@ -71,7 +64,7 @@ whnf (Case expr alts _) =
     [] -> error "Incomplete pattern!"
     (x:_) -> x
 
-whnf (Let decs body _) = whnf $ instantiateDecls decs body
+whnf (Let decs body _) = whnf $ instantiateExpr decs body
 
 nf :: Expr a -> Expr a
 nf expr@Const{} = expr
@@ -98,4 +91,4 @@ nf (Case (nf -> expr) alts _) =
     [] -> error "Incomplete pattern!"
     (x:_) -> nf x
 
-nf (Let decs body _) = nf $ instantiateDecls decs body
+nf (Let decs body _) = nf $ instantiateExpr decs body

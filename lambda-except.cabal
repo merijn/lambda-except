@@ -41,14 +41,17 @@ Executable lambda-except
                ,        comonad
                ,        containers
                ,        either
+               ,        haskeline
                ,        lens
                ,        mtl
                ,        parsers
+               ,        posix-pty
                ,        prelude-extras
                ,        reducers
                ,        text
                ,        transformers
                ,        trifecta
+               ,        unix
                ,        utf8-string
 
 Source-Repository head

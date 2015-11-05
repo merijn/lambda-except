@@ -48,9 +48,9 @@ runParser d (Parser p) inp = do
   where
     parse pa = starve $ feed inp $ stepParser (release d *> pa) mempty mempty
 
-parseFromFile :: Parser a -> String -> IO (Result a)
+parseFromFile :: MonadIO m => Parser a -> String -> m (Result a)
 parseFromFile p fn = do
-  s <- Strict.readFile fn
+  s <- liftIO $ Strict.readFile fn
   return $ runParser (Directed (UTF8.fromString fn) 0 0 0 0) p s
 
 parseFromData :: Reducer t Rope => Parser a -> t -> Result a

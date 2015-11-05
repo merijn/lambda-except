@@ -21,15 +21,15 @@ module AST
     , SimplePat(..)
     , Pat(..)
     , Alt(..)
+    , isCompoundExpr
     , abstractKeys
     , abstractPos
     , instantiate
     , instantiateNamed
+    , instantiateDecls
+    , instantiateExpr
     , abstractPat
     , stripName
-    , Void
-    , absurd
-    , vacuous
     , HasName(..)
     , HasType(..)
     , HasCons(..)
@@ -52,7 +52,6 @@ import Control.Lens hiding (Const, cons)
 import Control.Monad
 import Data.Foldable (toList)
 import Data.List (elemIndex)
-import Data.Void
 import Text.Trifecta.Rendering (Span(..), HasSpan(..))
 
 import UniqMap
@@ -124,6 +123,14 @@ data Alt f a = Alt (Pat Name) (Scope NamedVar f a) Loc
 
 -- Functions
 
+isCompoundExpr :: Expr a -> Bool
+isCompoundExpr e = case e of
+    Const{} -> False
+    Var{} -> False
+    LocVar{} -> False
+    Con _ [] _ -> False
+    _ -> True
+
 nameIt :: Functor f => (Name -> f a) -> Name -> f (Named a)
 nameIt f n = Named n <$> f n
 
@@ -139,6 +146,15 @@ instantiate f = Bound.instantiate (f . stripName)
 instantiateNamed
     :: Monad f => (b -> a) -> Scope (Named b) f (Named a) -> f (Named a)
 instantiateNamed f = Bound.instantiate (pure . fmap f)
+
+instantiateDecls :: Decls a -> UniqMap Name (Expr a, Expr a)
+instantiateDecls decs = vs
+  where
+    vs = fmap (bimap instVal instVal) decs
+    instVal = instantiate (fst . exprAt vs)
+
+instantiateExpr :: Decls a -> Scope NamedVar Expr a -> Expr a
+instantiateExpr decs = instantiate (fst . exprAt (instantiateDecls decs))
 
 abstractPat
     :: (HasName a, Monad f)

@@ -15,20 +15,22 @@ import Eval
 import PrettyPrint
 import UniqMap
 
-type TC a = StateT (Module (Named Type)) (Except Doc) a
+type TC a = StateT (UniqMap Name Type) (Except Doc) a
 
 rule :: Const -> Const -> TC Const
-rule Star Box  = return Box
 rule Star Star = return Star
-rule Box  Box  = return Box
+rule Star Box  = throwError $ text "No dependent types!"
 rule Box  Star = return Star
+rule Box  Box  = return Box
 
 typeCheckModule :: Module (Named Type) -> Either Doc ()
-typeCheckModule m = runExcept $ evalStateT (checkDecls (m^.decls)) m
+typeCheckModule m = runExcept $ evalStateT (checkDecls (m^.decls)) conTypes
+  where
+    conTypes = Type <$> m^.cons
 
 lookupCons :: Name -> Loc -> TC Type
-lookupCons n l = preuse (cons . ix n) >>= \case
-    Just x -> return . Type . set location l $ x
+lookupCons n l = preuse (ix n) >>= \case
+    Just t -> return . set location l $ t
     Nothing -> throwError $ vsep
         [ prettyLoc l <> text ":" <+> red (text "error") <> text ":"
         , prettySource l
@@ -41,10 +43,16 @@ typeCheckExpr
     :: Module (Named Type)
     -> Scope NamedVar Expr (Named Type)
     -> Either Doc Type
-typeCheckExpr m s = runExcept (evalStateT (typeOf $ instantiate (exprAt (fmap fst (instDecls (m^.decls)))) s) m)
+typeCheckExpr m expr = runExcept $ evalStateT checkType conTypes
+  where
+    conTypes = Type <$> m^.cons
+    checkType = do
+        decs <- instDecls $ m^.decls
+        typeOf $ instantiate (fst . exprAt decs) expr
+
 
 unify :: Type -> Type -> TC ()
-unify t1 t2 = when (t1 /= t2) $ do
+unify (Type t1) (Type t2) = when (t1 /= t2) $ do
     throwError . vsep $
         [ string "Could not match:"
         , prettyLoc (t1^.location)
@@ -56,20 +64,25 @@ unify t1 t2 = when (t1 /= t2) $ do
         , prettify t2
         ]
 
-instDecls :: Decls (Named Type) -> UniqMap Name (Expr (Named Type), Type)
-instDecls decs = xyzzy
+instDecls :: Decls (Named Type) -> TC (UniqMap Name (Expr (Named Type), Type))
+instDecls decs = case result of
+    Failure _ -> throwError $ text "Whoops"
+    Success r -> return r
   where
-    ts = fmap (bimap instVal instVal) decs
     es = fmap (first instType) decs
-    instVal = instantiate (fst . exprAt es)
-    instType = instantiate (snd . exprAt ts)
-    bar (e, _) (_, t) = (e, Type t)
-    Success xyzzy = intersectUniq bar es ts
+    vs = instantiateDecls decs
+
+    instType :: Scope NamedVar Expr (Named Type) -> Expr (Named Type)
+    instType = instantiateNamed (Type . snd . exprAt vs)
+
+    result = intersectUniq (\(e, _) (_, t) -> (e, Type t))  es vs
 
 checkDecls :: Decls (Named Type) -> TC ()
-checkDecls decs = forM_ (instDecls decs) $ \(e, ty) -> do
-    t1 <- typeOf e
-    unify ty t1
+checkDecls = instDecls >=> mapM_ checkPair
+  where
+    checkPair (e, ty) = do
+        t1 <- typeOf e
+        unify ty t1
 
 typeWith :: Pat a -> Type -> TC [Type]
 typeWith (Simple (VarP _ l)) t = return [set location l t]
@@ -115,7 +128,8 @@ typeOf (App e1 e2 _) = do
     Type t1 <- typeOf e1
     (Pi _ ty body _) <- case whnf t1 of
         t@Pi{} -> return t
-        _ -> throwError . vsep $
+        _ -> do
+          throwError . vsep $
             [ string "Function does not have Pi type!"
             , string (show e1)
             , prettyLoc (e1^.location)
@@ -152,4 +166,5 @@ typeOf (Case e alts _) = do
 
 typeOf (Let decs body _) = do
     checkDecls decs
-    typeOf $ instantiateNamed (snd . exprAt (instDecls decs)) body
+    d <- instDecls decs
+    typeOf $ instantiateNamed (snd . exprAt d) body

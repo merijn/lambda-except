@@ -43,9 +43,9 @@ moduleParser = do
     declarations <- buildDecls [x | Decl x <- contents]
     return $ Module types constructors declarations
   where
-    getCons = foldMap $ foo <> view (cons.to assocs)
-    foo :: Data a -> [(Name, Expr a)]
-    foo = pure . (view name &&& view type_)
+    getCons = foldMap $ splatCons <> view (cons.to assocs)
+    splatCons :: Data a -> [(Name, Expr a)]
+    splatCons = pure . (view name &&& view type_)
 
 dataParser :: Parser (Data Name)
 dataParser = do

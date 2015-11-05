@@ -2,13 +2,14 @@
 module Main where
 
 import Bound
-import Control.Lens
 import Control.Monad
+import Control.Monad.Trans
+import Control.Lens
 import Text.Trifecta (Result(..))
-import Text.PrettyPrint.ANSI.Leijen (putDoc, dullyellow, text)
+import Text.PrettyPrint.ANSI.Leijen (dullyellow, text)
+import System.Console.Haskeline
 import System.Environment
 import System.Exit
-import System.IO
 
 import AST
 import Eval
@@ -16,42 +17,42 @@ import Parser
 import PrettyPrint
 import TypeCheck
 
-evaluate :: Module Name -> IO ()
+evaluate :: Module Name -> InputT IO ()
 evaluate m = do
     case closed m of
-        Nothing -> putStrLn "Module has free variables!"
+        Nothing -> outputStrLn "Module has free variables!"
         Just tyModule -> do
             case typeCheckModule tyModule of
-                Left e -> putDoc e >> putStrLn ""
+                Left e -> outputPretty e
                 Right _ -> exprLoop tyModule
   where
-    exprLoop :: Module (Named Type) -> IO ()
+    exprLoop :: Module (Named Type) -> InputT IO ()
     exprLoop tyModule = forever $ do
-        putStr "> "
-        input <- getLine
-        when (null input) exitSuccess
-        case parseFromData expr input of
-            Failure errs -> putDoc errs >> putStrLn ""
-            Success e -> evalExpr tyModule e
-        putStrLn ""
+        outputStrLn ""
+        input <- getInputLine "> "
+        case input of
+            Nothing -> liftIO exitSuccess
+            Just s
+                | null s -> liftIO exitSuccess
+                | otherwise -> case parseFromData expr s of
+                    Failure errs -> outputPretty errs
+                    Success e -> evalExpr tyModule e
 
-    evalExpr :: Module (Named Type) -> Expr Name -> IO ()
+    evalExpr :: Module (Named Type) -> Expr Name -> InputT IO ()
     evalExpr tyModule e = do
         let scopedExpr = abstractKeys (tyModule^.decls) e
         case typeCheckExpr tyModule <$> closed scopedExpr of
-            Nothing -> putStrLn "Expression has free variables!"
-            Just (Left err) -> putDoc err >> putStrLn ""
-            Just (Right tyExpr) -> do
-                prettyPrint (nfWith m e)
-                putStr $ " " ++ show (dullyellow (text "::")) ++ " "
-                prettyPrint tyExpr
+            Nothing -> outputStrLn "Expression has free variables!"
+            Just (Left err) -> outputPretty err
+            Just (Right (Type tyExpr)) -> do
+                outputPretty (nfWith m e)
+                outputStr $ " " ++ show (dullyellow (text "::")) ++ " "
+                outputPretty tyExpr
 
 main :: IO ()
 main = do
-    hSetBuffering stdin NoBuffering
-    hSetBuffering stdout NoBuffering
-
     (file:_) <- getArgs
-    parseFromFile moduleParser file >>= \case
-        Failure errs -> putDoc errs >> putStrLn "" >> exitFailure
-        Success m -> prettyPrint m >> putStrLn "" >> evaluate m
+    runInputT defaultSettings $ do
+        parseFromFile moduleParser file >>= \case
+            Failure errs -> outputPretty errs
+            Success m -> outputPretty m >> evaluate m
